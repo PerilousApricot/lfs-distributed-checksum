@@ -1,0 +1,8 @@
+LFS distributed checksummer/file migrator
+ - Andrew Melo <andrew.m.melo@vanderbilt.edu>
+
+A client/server system to execute shell scripts on a number of workers
+
+Dependencies
+ python2.6, zeromq, pyzmq, LFS, BFS, lst-* tools, lio_* tools
+
