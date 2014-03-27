@@ -3,6 +3,14 @@
 set -x
 path=$1
 bfsPath=${1:6}
+statsdHost="brazil.vampire 8125"
+
+echo "lfs.migrate.start:1|c" | nc -w 1 -u brazil.vampire 8125
+function writeStatsd {
+    echo $1 | nc -w 1 -u $statsdHost
+}
+
+writeStatsd "lfs.migrate.start:1|c"
 
 if [[ ! -e $path ]]; then
     if [[ -e /lio/lfs/cms$path ]]; then
@@ -31,14 +39,20 @@ fi
 
 #get cksum and adler32 from BFS - possibly caching results if they don't exist
 function getBFSAttr {
-    for counter in 1 2 3 4 5; do
+    gotResult=0
+    for counter in 2 4 6 8 10 12 14 16 18 20; do
         val=$(lst-getAttr -u cms -p neutralpion $1 cms-lstore.vampire:$2)
         if [[ $? -eq 0 && $val != *FATAL* ]]; then
             echo $val
+            gotResult=1
             break
         fi
         sleep $counter
     done
+    if [[ ! $gotResult ]]; then
+        echo "Couldn't get attribute from lstore"
+        exit 5
+    fi
 }
 accreCksum_tmp=$(getBFSAttr accre_cksum $bfsPath)
 accreAdler32_tmp=$(getBFSAttr accre_adler32 $bfsPath)
@@ -77,7 +91,7 @@ if [[ $migrationVersion -lt $movementVersion ]]; then
     fi
 
     #check if transfer was successful
-    inspectOutput=$(lio_inspect -o inspect_full_check @:/cms$path)
+    inspectOutput=$(lio_inspect -f -o inspect_quick_repair @:/cms$path)
     inspectErrorCode=$?
     inspectErrorStatus=$(echo $inspectOutput | grep ERROR)
 

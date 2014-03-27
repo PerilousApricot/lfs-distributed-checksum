@@ -4,19 +4,22 @@
 
     Moves files from BFS to LFS. Hopefully does the right thing
 """
-
+import json
 import multiprocessing
 import optparse
 import os
 import os.path
+import pprint
+import random
 import subprocess
 import sys
 import time
+import uuid
 
 # constants
 concurrency = 100
 maxRetries = 1
-monitorDelta = 5
+monitorDelta = 10
 
 parser = optparse.OptionParser()
 parser.add_option('-f', '--file', dest='filelist',
@@ -35,7 +38,6 @@ def getCallback(result):
     """
     called in main thread, updates global state
     """
-    print "Received callback"
     for row in result:
         if row == None:
             continue
@@ -62,7 +64,6 @@ if opts.filelist:
         # remove trailing newline
         fileList[oneFile[:-1]] = {'state':'new'}
 
-
 print "Processing %i files for transfer" % len(fileList)
 def tallyJobs():
     stateCount = {"new":0, "complete":0, "failed":0}
@@ -73,6 +74,8 @@ def tallyJobs():
 p = multiprocessing.Pool(concurrency)
 inFlight = {}
 monitorUpdateTime = time.time()
+runningOrder = fileList.keys()
+random.shuffle(runningOrder)
 while True:
     # Give an update about our status
     if monitorUpdateTime + monitorDelta < time.time():
@@ -87,7 +90,8 @@ while True:
         print "Total jobs %s, in flight %s - %s" % (len(fileList), len(inFlight), outStr)
         monitorUpdateTime = time.time()
     # Fill up enough slots in the queue to keep the workers busy
-    for k,v in fileList.iteritems():
+    for k in runningOrder:
+        v = fileList[k]
         if len(inFlight) > 3*concurrency:
             break
         if v['state'] in ['new','failed'] and v.get('retries',0) < maxRetries:
@@ -113,8 +117,13 @@ while True:
         # if we need more commands, loop around
         if len(inFlight) < 2*concurrency or monitorUpdateTime + monitorDelta < time.time():
             break
-import pprint
-print "Jobs complete. Failed files are:"
+
+failureJSON = {}
+failureKey = uuid.uuid1()
+print "Jobs complete. Fail reasons are stored in %s. Failed files are:" %\
+            failureKey
 for k,v in fileList.items():
     if v['state'] == 'failed':
+        failureJSON[k] = v
         print k
+json.dumps(failureJSON, open("%s-fail.txt" % failureKey, 'w'),sort_keys=True,indent=2)

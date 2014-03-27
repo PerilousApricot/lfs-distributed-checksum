@@ -1,13 +1,16 @@
-#!/usr/bin/env python2.6
+#!/usr/bin/env python
 
 import fcntl
 import json
 import os
 import os.path
+import select
+import signal
 import socket
 import subprocess
 import sys
 import time
+import uuid
 import zmq
 
 if len(sys.argv) != 2:
@@ -19,7 +22,6 @@ taskList = {}
 taskCount = 0
 for x in range(coreCount):
     taskList[x] = None
-hostname = socket.getfqdn()
 # Make the ZMQ context
 context = zmq.Context()
 
@@ -27,14 +29,63 @@ context = zmq.Context()
 frontendSock = context.socket(zmq.REQ)
 frontendSock.connect("tcp://brazil.vampire:5556")
 
+
+# Helper to send/recv messages in a nonblocking way
+def trySend(sock, message):
+    reply = None
+    for _ in range(4):
+        try:
+            sock.send_json(message)
+        except zmq.ZMQError:
+            # try resetting the socket
+            sock.close()
+            sock.connect("tcp://brazil.vampire:5556")
+        ready,_,_ = zmq.select([sock],[],[],10.0)
+        if ready:
+            return sock.recv_json()
+        print "Awaiting response from server"
+    return reply
+
 # loop forever
+checkinTime = 0
+isDraining = False
+scriptModificationTime = os.stat(__file__).st_mtime
+workerID = "%s-%s" % (socket.getfqdn(),uuid.uuid4())
+timeToDie = 0
+# used to wait on child jobs to exit
+poller = select.epoll()
 while 1:
     needSleep = True
-    if taskCount < coreCount:
+    if time.time() > checkinTime:
+        message = {'type' : 'workerHeartbeat',
+                   'id' : workerID,
+                   'cores' : coreCount,
+                   'activeJobs' : taskCount}
+        trySend(frontendSock, message)
+        checkinTime = time.time() + 10
+        if os.stat(__file__).st_mtime != scriptModificationTime:
+            coreCount = 0
+            isDraining = True
+            timeToDie = time.time() + 10 * 60
+            print "Worker script was updated, entering drain mode"
+            print "  Worker will die in %s secs" % (timeToDie - time.time())
+
+    if timeToDie and time.time() > timeToDie:
+        print "Can't wait forever to restart the server, dying now"
+        sys.exit(0)
+
+    if isDraining and taskCount == 0:
+        print "All jobs successfully drained, exiting"
+        sys.exit(0)
+
+    if taskCount < coreCount and not isDraining:
+        if not os.path.exists('/store/user') or not os.path.exists('/lio/lfs/cms/store'):
+            print "Couldn't access filesystems, not pulling work"
+            time.sleep(15)
+            continue
         message = {'type' : 'needWork',
-                   'host' : hostname }
-        frontendSock.send_json(message)
-        reply = frontendSock.recv_json()
+                   'id' : workerID }
+        reply = trySend(frontendSock, message)
         if reply['target']:
             taskCount += 1
             needSleep = False
@@ -45,6 +96,8 @@ while 1:
                     extractCommand = 'cat'
                 else:
                     extractCommand = 'lio_get'
+                # lio_get is ruining me
+                # extractCommand = 'cat'
                 processCommand = "%s %s | ./checksum.py %s" % \
                                     (extractCommand,path,path)
             elif jobType == 'filemove':
@@ -54,7 +107,7 @@ while 1:
                 print "Got unknown job type %s .. skipping" % jobType
                 continue
 
-            print "Doing checksum %s : %s" % (reply, processCommand)
+            print "Doing %s: %s" % (jobType, processCommand)
             for taskSlot in taskList:
                 if taskList[taskSlot] == None:
                     break
@@ -63,6 +116,7 @@ while 1:
                                     shell=True,
                                     stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE)
+            poller.register(p.stdout, select.EPOLLHUP)
             taskList[taskSlot] = {'process' : p,
                                   'output' : '',
                                   'error' : '',
@@ -94,18 +148,23 @@ while 1:
             task['process'].poll()
             if task['process'].returncode != None:
                 task['process'].wait()
+                poller.unregister(task['process'].stdout)
                 print "Task number %s ended" % taskSlot
                 message = { 'type' : 'workDone',
                             'path' : task['path'],
                             'jobType' : task['jobType'],
                             'output' : task['output'],
                             'exitCode' : task['process'].returncode,
-                            'error' : task['error']}
-                frontendSock.send_json(message)
-                reply = frontendSock.recv_json()
+                            'error' : task['error'],
+                            'worker' : workerID}
+                trySend(frontendSock, message)
                 taskCount -= 1
                 taskList[taskSlot] = None
                 needSleep = False
     if needSleep:
-        print "No work this cycle, sleeping (%s jobs running)" % taskCount
-        time.sleep(5)
+        sys.stdout.write("No work this cycle, sleeping (%s jobs running)" % taskCount)
+        # Jobs may end more quickly than we anticipated
+        #time.sleep(5)
+        startTime = time.time()
+        poller.poll(5)
+        print "..done (%s sec)" % (time.time() - startTime)

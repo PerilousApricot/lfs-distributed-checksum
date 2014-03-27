@@ -1,13 +1,17 @@
-#!/usr/bin/env python2.6
+#!/usr/bin/env python
 """
     checksummer.py - reads from stdin and returns checksums
 """
 
 import hashlib
+import socket
 import subprocess
 import sys
 import time
 import zlib
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+#sock.sendto("lfs.checksum.start:1|c", ('brazil.vampire', 8125))
 
 targetFile = None
 if len(sys.argv) == 2:
